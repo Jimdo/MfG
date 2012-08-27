@@ -11,10 +11,12 @@ import yaml
 
 from munin import MuninClient
 
-DEFAULT_CONFIG_FILE = '/etc/mfg.ini'
-DEFAULT_CARBON_PORT = 2003
-DEFAULT_FACTER_PREFIX = '{hostname}.'
-DEFAULT_INTERVAL = 60
+DEFAULT_CONFIG = {
+		'config_file': '/etc/mfg.ini',
+		'carbon_port': 2003,
+		'metric_prefix': '{hostname}.',
+		'interval': 60
+		}
 
 def facter():
     try:
@@ -63,14 +65,22 @@ class CarbonClient(object):
 
 
 def parse_config_file(config_file):
+    config_file_structure = (
+		    ('carbon_port', 'carbon', 'port'),
+		    ('carbon_host', 'carbon', 'host'),
+		    ('metric_prefix', 'facter', 'prefix'),
+		    ('interval', 'mfg', 'interval'),
+		    )
+    
     c = ConfigParser.ConfigParser()
     c.read(config_file)
     host = c.get('carbon','host')
-    try:
-        port = c.get('carbon','port')
-    except ConfigParser.Error:
-        logging.warning('Could not get carbon port from config %s, using %s', config_file, DEFAULT_CARBON_PORT)
-        port = DEFAULT_CARBON_PORT
+    for config_key, section, key in config_file_structure:
+	    try:
+		port = c.get('carbon','port')
+	    except ConfigParser.Error:
+		logging.warning('Could not get carbon port from config %s, using %s', config_file, DEFAULT_CARBON_PORT)
+		port = DEFAULT_CARBON_PORT
 
     try:
         prefix_pattern = c.get('facter', 'prefix')
@@ -88,21 +98,22 @@ def parse_config_file(config_file):
 def parse_command_line():
     # TODO
     parser = OptionParser()
-    parser.add_option("-c", "--config", dest="config_file", default = DEFAULT_CONFIG_FILE,
-            help="use configuration in FILE, default: %default", metavar="FILE")
-    parser.add_option("-i", "--interval", dest="interval", default = DEFAULT_INTERVAL,
-            help="send metrics every SECONDS, default: %default", metavar="SECONDS")
-    parser.add_option("-H", "--carbon-host", dest="carbon_host",
+    parser.add_option("-c", "--config", dest="config_file",
+            help="use configuration in FILE, default: %s" % DEFAULT_CONFIG['config_file'], metavar="FILE")
+    parser.add_option("-i", "--interval", dest="interval",
+            help="send metrics every SECONDS, default: %s" % DEFAULT_CONFIG['interval'], metavar="SECONDS")
+    parser.add_option("-H", "--carbon-host",
             help="send metrics to carbon host HOST", metavar="HOST")
-    parser.add_option("-p", "--carbon-port", dest="carbon_port", default=DEFAULT_CARBON_PORT,
-            help="use carbon port PORT, default: %default", metavar="PORT")
-    parser.add_option("-m", "--metric-prefix", dest="prefix", default=DEFAULT_CARBON_PORT,
-            help="use carbon port PORT, default: %default", metavar="PORT")
-    parser.add_option("-q", "--quiet", action="store_false", dest="verbose",
-            default=True, help="don't print status messages to stdout")
+    parser.add_option("-p", "--carbon-port",
+            help="use carbon port PORT, default: %s" % DEFAULT_CONFIG['carbon_port'], metavar="PORT")
+    parser.add_option("-m", "--metric-prefix", dest="prefix",
+            help="prefix every sent metric with PREFIX, default: %s" % DEFAULT_CONFIG['metric_prefix'], metavar="PREFIX")
+    parser.add_option("-v", "--verbose", action="count", dest="verbose", help="be more verbose")
 
     (options, args) = parser.parse_args()
-    return options
+    logging.getLogger().setLevel((logging.ERROR, logging.WARNING, logging.INFO, logging.DEBUG)[max(options.verbose, 3)])
+    logging.debug('command line options: %s', options)
+    return options.__dict__
 
 def fetch_from_munin(munin_client):
     logging.debug('going to ask munin for items')
@@ -125,28 +136,27 @@ def send_to_carbon(carbon_client, prefix, messages):
     logging.info('sent %d messages', len(messages))
 
 def main():
-    options = parse_command_line()
-    config_file = options.config_file if options.config_file else DEFAULT_CONFIG_FILE
-    host, port, prefix_pattern, interval = parse_config_file(config_file)
+    config_file = DEFAULT_CONFIG['config_file']
+    command_line_config = parse_command_line()
+    if 'config_file' in command_line_config:
+        config_file = command_line_config['config_file']
 
-    if options.carbon_port:
-        host = options.carbon_port
 
-    if options.carbon_host:
-        host = options.carbon_host
+    config_from_file = parse_config_file(config_file)
 
-    if options.prefix:
-        prefix_pattern = options.prefix
-
+    config = default_config.copy()
+    config.update(config_from_file)
+    config.update(command_line_config)
+    
     facts = facter()
 
-    prefix = compute_prefix(facts, prefix_pattern)
-    carbon_client = CarbonClient(host, port)
+    prefix = compute_prefix(facts, config['prefix_pattern'])
+    carbon_client = CarbonClient(config['host'], config['port'])
     munin_client = MuninClient('127.0.0.1')
 
     while True:
         started = time.time()
-        next_iteration = started + interval
+        next_iteration = started + config['interval']
 
         messages = fetch_from_munin(munin_client)
         send_to_carbon(carbon_client, prefix, messages)
